@@ -1,0 +1,14 @@
+# Rojo artifacts
+*.rbxl
+*.rbxlx
+*.rbxmx
+*.rbxm
+build/
+out/
+serve.log
+
+# Editor/OS noise
+.DS_Store
+*.swp
+.vscode/
+.idea/
