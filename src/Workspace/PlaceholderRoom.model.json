@@ -129,6 +129,30 @@
         "Color": [0.18, 0.17, 0.14],
         "Material": "WoodPlanks"
       }
+    },
+    {
+      "className": "Part",
+      "name": "LumenWell",
+      "properties": {
+        "Anchored": true,
+        "CanCollide": true,
+        "Size": [2, 2, 2],
+        "Position": [10, 2, -8],
+        "Color": [0.2, 0.9, 0.85],
+        "Material": "Neon"
+      },
+      "children": [
+        {
+          "className": "PointLight",
+          "name": "CoreLight",
+          "properties": {
+            "Brightness": 3,
+            "Range": 14,
+            "Color": [0.35, 1, 0.95],
+            "Shadows": false
+          }
+        }
+      ]
     }
   ]
 }

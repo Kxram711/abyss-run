@@ -6,6 +6,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Knit = require(ReplicatedStorage.Packages.Knit)
 
 require(script.Parent.Controllers.LumenController)
+require(script.Parent.Controllers.FlashlightController)
 require(script.Parent.Controllers.RunHudController)
 
 Knit.Start():catch(warn)
