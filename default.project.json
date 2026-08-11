@@ -1,0 +1,39 @@
+{
+  "name": "abyss-run",
+  "tree": {
+    "$className": "DataModel",
+
+    "ReplicatedStorage": {
+      "$path": "src/ReplicatedStorage"
+    },
+
+    "ServerScriptService": {
+      "$path": "src/ServerScriptService"
+    },
+
+    "StarterPlayer": {
+      "$className": "StarterPlayer",
+      "StarterPlayerScripts": {
+        "$path": "src/StarterPlayer/StarterPlayerScripts"
+      }
+    },
+
+    "Workspace": {
+      "$path": "src/Workspace"
+    },
+
+    "Lighting": {
+      "$className": "Lighting",
+      "$properties": {
+        "Ambient": [0.03, 0.03, 0.04],
+        "OutdoorAmbient": [0.03, 0.03, 0.04],
+        "Brightness": 0,
+        "ClockTime": 0,
+        "FogColor": [0.01, 0.01, 0.012],
+        "FogStart": 24,
+        "FogEnd": 80,
+        "GlobalShadows": true
+      }
+    }
+  }
+}
