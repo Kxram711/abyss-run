@@ -207,17 +207,24 @@ end
 function EntityService:_MonitorLoop()
     while true do
         task.wait(CONFIG.Spawn.MonitorInterval)
-        local floorsFolder = Workspace:FindFirstChild("Floors")
-        local floorFolder = floorsFolder and floorsFolder:FindFirstChildOfClass("Folder") or nil
-        if floorFolder == nil then
-            if self.ActiveFloor ~= nil then
-                self:_CleanupAll("floor_gone")
-            end
-            continue
+        self:EnsureFloorSynced()
+    end
+end
+
+--- Public hook: the run/floor lifecycle calls this right after a rebuild so
+--- spawns start immediately instead of waiting on the monitor tick. Mirrors
+--- the monitor's logic exactly — no behavior change (spawn pacing is unchanged).
+function EntityService:EnsureFloorSynced()
+    local floorsFolder = Workspace:FindFirstChild("Floors")
+    local floorFolder = floorsFolder and floorsFolder:FindFirstChildOfClass("Folder") or nil
+    if floorFolder == nil then
+        if self.ActiveFloor ~= nil then
+            self:_CleanupAll("floor_gone")
         end
-        if floorFolder ~= self.CurrentFloorFolder then
-            self:_OnFloorChanged(floorFolder)
-        end
+        return
+    end
+    if floorFolder ~= self.CurrentFloorFolder then
+        self:_OnFloorChanged(floorFolder)
     end
 end
 
