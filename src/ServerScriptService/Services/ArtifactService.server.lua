@@ -115,6 +115,8 @@ function ArtifactService:KnitStart()
     self.CurrentFloorFolder = nil :: Folder?
     self.Nodes = {} -- { BasePart } on the current floor (for bookkeeping)
 
+    self:_PublishCarry() -- HUD/late-joiners see a real (empty) snapshot immediately
+
     task.spawn(function()
         self:_MonitorLoop()
     end)

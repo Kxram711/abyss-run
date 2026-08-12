@@ -207,6 +207,25 @@ function LumenService:ExitDarkness()
 end
 
 -- ---------------------------------------------------------------------------
+-- Run lifecycle resets (GDD §3.2/§4.7)
+-- ---------------------------------------------------------------------------
+
+-- RunService calls this at StartRun: the squad drops with a full shared pool
+-- and fresh Wells (GDD §3.2 step 2). Clearing UsedWells also drops references
+-- to the previous floor's destroyed Well parts.
+function LumenService:ResetForRun()
+    self.UsedWells = {}
+    self:SetLumen(CONFIG.MaxLumen)
+    print("[LumenService] Run reset — pool restored to 100, Wells refreshed.")
+end
+
+-- Floor advance: the new floor's Wells are fresh parts (one use each). The
+-- pool carries through a run — the drain is the pressure (GDD §4.3/§4.7).
+function LumenService:ResetWells()
+    self.UsedWells = {}
+end
+
+-- ---------------------------------------------------------------------------
 -- Recharge sources (action-based only; no passive regen, GDD §4.2)
 -- ---------------------------------------------------------------------------
 
