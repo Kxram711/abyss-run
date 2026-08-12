@@ -7,6 +7,7 @@ local Knit = require(ReplicatedStorage.Packages.Knit)
 
 require(script.Parent.Services.LumenService)
 require(script.Parent.Services.FloorService)
+require(script.Parent.Services.EntityService)
 require(script.Parent.Services.ArtifactService)
 require(script.Parent.Services.ExtractionService)
 require(script.Parent.Services.RunService)
