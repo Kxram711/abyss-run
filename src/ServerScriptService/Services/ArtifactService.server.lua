@@ -386,7 +386,7 @@ function ArtifactService:AddToCarry(artifact: any): any?
         local entry = self:_MakeCarryEntry(artifact, true)
         self.SpecialSlot = entry
         self:_PublishCarry()
-        self.Client.ArtifactPickedUp:Fire(entry)
+        self.Client.ArtifactPickedUp:FireAll(entry) -- squad-wide pickup toast (HUD)
         return entry
     end
     if #self.Carry >= CONFIG.CarryRegularSlots then
@@ -395,7 +395,7 @@ function ArtifactService:AddToCarry(artifact: any): any?
     local entry = self:_MakeCarryEntry(artifact, false)
     table.insert(self.Carry, entry)
     self:_PublishCarry()
-    self.Client.ArtifactPickedUp:Fire(entry)
+    self.Client.ArtifactPickedUp:FireAll(entry) -- squad-wide pickup toast (HUD)
     return entry
 end
 
