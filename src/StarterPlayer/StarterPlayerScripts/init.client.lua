@@ -8,5 +8,7 @@ local Knit = require(ReplicatedStorage.Packages.Knit)
 require(script.Parent.Controllers.LumenController)
 require(script.Parent.Controllers.FlashlightController)
 require(script.Parent.Controllers.RunHudController)
+require(script.Parent.Controllers.AtmosphereController)
+require(script.Parent.Controllers.AudioController)
 
 Knit.Start():catch(warn)
