@@ -210,6 +210,28 @@ function RunHudController:_BuildGui()
     ui.ToastLabel.Visible = false
     ui.ToastLabel.TextTransparency = 1
 
+    -- Threat overlays (follow-up #4). Sibling order = render order: these sit
+    -- above MainHud so the damage flash / flicker tint the whole screen.
+    ui.DamageFlash = New("Frame", {
+        Name = "DamageFlash",
+        Size = UDim2.fromScale(1, 1),
+        BackgroundColor3 = Color3.fromRGB(140, 24, 20),
+        BackgroundTransparency = 1,
+        BorderSizePixel = 0,
+        Visible = false,
+    }, ui.Root) :: Frame
+    ui.WardenFlickerFrame = New("Frame", {
+        Name = "WardenFlicker",
+        Size = UDim2.fromScale(1, 1),
+        BackgroundColor3 = BLACK,
+        BorderSizePixel = 0,
+        Visible = false,
+    }, ui.Root) :: Frame
+    ui.ThreatCue = Label(ui.Main, "", UDim2.new(0.92, 0, 0, 28), UDim2.new(0.5, 0, 0, 140), FONT_HEAD, 15, AMBER, Enum.TextXAlignment.Center) :: TextLabel
+    ui.ThreatCue.AnchorPoint = Vector2.new(0.5, 0)
+    ui.ThreatCue.Visible = false
+    ui.ThreatCue.TextTransparency = 1
+
     -- Carry row (bottom-center, above the thumb zone): 5 regular slots + special.
     ui.CarryRow = Panel(ui.Main, UDim2.fromOffset(246, 60), UDim2.new(0.5, 0, 1, -82), Vector2.new(0.5, 1))
     ui.CarryRow.BackgroundTransparency = 1
@@ -277,6 +299,26 @@ function RunHudController:_BuildGui()
         BorderSizePixel = 0,
         Visible = false,
     }, ui.Root) :: Frame
+    ui.LootTitle = Label(ui.LootScreen, "", UDim2.fromScale(0.92, 0.09), UDim2.fromScale(0.5, 0.13), FONT_HEAD, 30, TEXT, Enum.TextXAlignment.Center) :: TextLabel
+    ui.LootTitle.AnchorPoint = Vector2.new(0.5, 0)
+    ui.LootSubtitle = Label(ui.LootScreen, "", UDim2.fromScale(0.92, 0.05), UDim2.fromScale(0.5, 0.23), FONT_BODY, 15, DIM, Enum.TextXAlignment.Center) :: TextLabel
+    ui.LootSubtitle.AnchorPoint = Vector2.new(0.5, 0)
+    ui.LootRows = New("Frame", {
+        Size = UDim2.new(0.8, 0, 0, 132),
+        Position = UDim2.new(0.5, 0, 0.33, 0),
+        AnchorPoint = Vector2.new(0.5, 0),
+        BackgroundTransparency = 1,
+    }, ui.LootScreen) :: Frame
+    ui.LootMath = New("Frame", {
+        Size = UDim2.new(0.8, 0, 0, 60),
+        Position = UDim2.new(0.5, 0, 0.56, 0),
+        AnchorPoint = Vector2.new(0.5, 0),
+        BackgroundTransparency = 1,
+    }, ui.LootScreen) :: Frame
+    ui.LootTotal = Label(ui.LootScreen, "", UDim2.fromScale(0.92, 0.08), UDim2.fromScale(0.5, 0.7), FONT_MONO, 32, PALE_GREEN, Enum.TextXAlignment.Center) :: TextLabel
+    ui.LootTotal.AnchorPoint = Vector2.new(0.5, 0)
+    ui.LootHint = Label(ui.LootScreen, "", UDim2.fromScale(0.92, 0.05), UDim2.fromScale(0.5, 0.86), FONT_BODY, 14, DIM, Enum.TextXAlignment.Center) :: TextLabel
+    ui.LootHint.AnchorPoint = Vector2.new(0.5, 0)
 
     Log("HUD built")
 end
@@ -391,10 +433,13 @@ function RunHudController:ShowArtifactToast(entry: any)
     if self.ToastTween then
         self.ToastTween:Cancel()
     end
-    -- Hold 1.5s, fade out over 0.45s.
+    -- Hold 1.5s, fade out over 0.45s. `played` guard: a canceled tween must
+    -- not hide a toast that was just re-shown.
     self.ToastTween = TweenService:Create(toast, TweenInfo.new(0.45, Enum.EasingStyle.Quad, Enum.EasingDirection.Out, 0, false, 1.5), { TextTransparency = 1 })
-    self.ToastTween.Completed:Connect(function()
-        toast.Visible = false
+    self.ToastTween.Completed:Connect(function(played: boolean)
+        if played then
+            toast.Visible = false
+        end
     end)
     self.ToastTween:Play()
 end
@@ -409,6 +454,11 @@ end
 
 function RunHudController:SetRunState(state: string, payload: any?)
     self.RunState = state
+    -- The in-run payload IS the RunInfo table (has Floor) — read it immediately
+    -- so the floor number doesn't sit at "—" until the property lands.
+    if type(payload) == "table" and type(payload.Floor) == "number" then
+        self:SetFloor(payload.Floor)
+    end
     local inRun = state == "in-run"
     self.UI.CarryRow.Visible = inRun
     self.UI.LumenBar.Visible = inRun
@@ -422,12 +472,169 @@ function RunHudController:SetRunState(state: string, payload: any?)
         self.UI.LootScreen.Visible = false
     elseif state == "extracted" then
         self.UI.RunStateLabel.TextColor3 = PALE_GREEN
+        self:ShowLootScreen(payload)
     elseif state == "wiped" then
         self.UI.RunStateLabel.TextColor3 = RED
+        self:ShowWipeScreen(payload)
     end
-    -- extracted/wiped surfaces (loot screen) are handled by the follow-up
-    -- section appended in a later commit on this branch.
     Log(("Run state -> %s"):format(state))
+end
+
+-- ---------------------------------------------------------------------------
+-- Threat cues (follow-up #4)
+-- ---------------------------------------------------------------------------
+-- Brief red full-screen flash when the LOCAL player takes a threat hit
+-- (GDD §4.5: Wanderer hits Lumen first; flash reads even at low health states).
+function RunHudController:DamageFlash()
+    local flash = self.UI.DamageFlash :: Frame
+    if self.FlashTween then
+        self.FlashTween:Cancel()
+    end
+    flash.Visible = true
+    flash.BackgroundTransparency = 0.45
+    self.FlashTween = TweenService:Create(flash, TweenInfo.new(0.4, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), { BackgroundTransparency = 1 })
+    self.FlashTween.Completed:Connect(function(played: boolean)
+        if played then
+            flash.Visible = false
+        end
+    end)
+    self.FlashTween:Play()
+end
+
+-- Warden gaze: light-bulb-fail stutter (GDD §4.5/§9) — short irregular black
+-- drops over the whole screen, capped so it's a scare, not a 5s blackout.
+function RunHudController:WardenFlicker(flickerSeconds: number)
+    local frame = self.UI.WardenFlickerFrame :: Frame
+    self.FlickerLoopId += 1
+    local id = self.FlickerLoopId
+    task.spawn(function()
+        local t0 = os.clock()
+        local on = true
+        local Rng = Random.new()
+        while os.clock() - t0 < math.min(flickerSeconds, 1.6) and self.FlickerLoopId == id do
+            on = not on
+            frame.Visible = on
+            task.wait(on and 0.05 or 0.03 + Rng:NextNumber() * 0.06)
+        end
+        frame.Visible = false
+    end)
+end
+
+-- Subtle alert cue when an entity picks up the squad's trail.
+function RunHudController:ShowThreatCue(text: string)
+    local cue = self.UI.ThreatCue :: TextLabel
+    cue.Text = text
+    cue.TextTransparency = 0
+    cue.Visible = true
+    if self.CueTween then
+        self.CueTween:Cancel()
+    end
+    self.CueTween = TweenService:Create(cue, TweenInfo.new(0.4, Enum.EasingStyle.Quad, Enum.EasingDirection.Out, 0, false, 1.1), { TextTransparency = 1 })
+    self.CueTween.Completed:Connect(function(played: boolean)
+        if played then
+            cue.Visible = false
+        end
+    end)
+    self.CueTween:Play()
+end
+
+-- ---------------------------------------------------------------------------
+-- Loot / wipe screens (follow-up #5)
+-- ---------------------------------------------------------------------------
+local function RowLabel(parent: Instance, text: string, color: Color3, xAlign: Enum.TextXAlignment, widthScale: number): TextLabel
+    return Label(parent, text, UDim2.new(widthScale, 0, 1, 0), UDim2.fromOffset(12, 0), FONT_BODY, 16, color, xAlign)
+end
+
+function RunHudController:_ClearLoot()
+    self.UI.LootRows:ClearAllChildren()
+    self.UI.LootMath:ClearAllChildren()
+end
+
+-- Extraction results (GDD §4.4 math reveal + §4.7): artifact list with rarity
+-- colors, multiplier breakdown, total banked, run-it-back hint.
+function RunHudController:ShowLootScreen(results: any)
+    if type(results) ~= "table" then
+        return
+    end
+    self:_ClearLoot()
+    local screen = self.UI.LootScreen
+    local bd = results.Breakdown or {}
+    local artifacts: { any } = {}
+    for _, entry in ipairs(results.Artifacts or {}) do
+        table.insert(artifacts, entry)
+    end
+    if results.SpecialSlot ~= nil then
+        table.insert(artifacts, results.SpecialSlot)
+    end
+    self.UI.LootTitle.Text = "EXTRACTED"
+    self.UI.LootTitle.TextColor3 = PALE_GREEN
+    self.UI.LootSubtitle.Text = ("FLOOR %d  ·  %s"):format(
+        results.FloorReached or 0,
+        results.SquadAlive and "THE WHOLE SQUAD MADE IT OUT" or "SOMEONE WAS LEFT IN THE DARK"
+    )
+    for i, entry in ipairs(artifacts) do
+        local row = New("Frame", {
+            Size = UDim2.new(1, 0, 0, 24),
+            Position = UDim2.fromOffset(0, (i - 1) * 25),
+            BackgroundTransparency = 1,
+        }, self.UI.LootRows) :: Frame
+        local color = RARITY_COLORS[entry.Rarity] or RARITY_COLORS.Common
+        RowLabel(row, entry.Name, color, Enum.TextXAlignment.Left, 0.78)
+        RowLabel(row, ("+%dF"):format(entry.BaseValue or 0), DIM, Enum.TextXAlignment.Right, 0.22)
+    end
+    if #artifacts == 0 then
+        RowLabel(self.UI.LootRows, "NOTHING CARRIED", DIM, Enum.TextXAlignment.Left, 1)
+    end
+    local lines: { string } = {}
+    table.insert(lines, ("BASE  ·  %dF"):format(bd.BaseSum or 0))
+    if (bd.AliveMultiplier or 1) > 1 then
+        table.insert(lines, ("SQUAD ALIVE  ·  ×%.2f"):format(bd.AliveMultiplier))
+    end
+    if (bd.ObjectiveMultiplier or 1) > 1 then
+        table.insert(lines, ("OBJECTIVES (%d)  ·  ×%.2f"):format(bd.ObjectivesCompleted or 0, bd.ObjectiveMultiplier))
+    end
+    if (bd.LonerMultiplier or 1) > 1 then
+        table.insert(lines, ("LONER'S LEDGER  ·  ×%.2f"):format(bd.LonerMultiplier))
+    end
+    for i, line in ipairs(lines) do
+        RowLabel(self.UI.LootMath, line, DIM, Enum.TextXAlignment.Left, 1)
+    end
+    self.UI.LootTotal.TextColor3 = PALE_GREEN
+    self.UI.LootTotal.Text = ("%d F  BANKED"):format(results.BankedFilaments or 0)
+    self.UI.LootHint.Text = "RUN IT BACK — THE BANK KEEPS THIS FOREVER"
+    screen.Visible = true
+    Log(("Loot screen: %dF banked (%d artifact(s))"):format(results.BankedFilaments or 0, #artifacts))
+end
+
+-- Wipe (GDD §4.7): run loot lost, bank safe, immediate re-queue framing.
+function RunHudController:ShowWipeScreen(payload: any)
+    if type(payload) ~= "table" then
+        return
+    end
+    self:_ClearLoot()
+    local lost = payload.LostArtifacts or {}
+    local artifacts: { any } = lost.Artifacts or {}
+    local count = #artifacts + (lost.SpecialSlot ~= nil and 1 or 0)
+    self.UI.LootTitle.Text = "THE DARK GOT ITS TAKE"
+    self.UI.LootTitle.TextColor3 = RED
+    self.UI.LootSubtitle.Text = ("FLOOR %d  ·  %s"):format(payload.FloorReached or 0, tostring(payload.Reason or "squad lost"))
+    if count == 0 then
+        RowLabel(self.UI.LootRows, "NOTHING CARRIED — THE DARK GOT NOTHING EITHER", DIM, Enum.TextXAlignment.Left, 1)
+    else
+        local names: { string } = {}
+        for _, entry in ipairs(artifacts) do
+            table.insert(names, entry.Name)
+        end
+        if lost.SpecialSlot ~= nil then
+            table.insert(names, lost.SpecialSlot.Name)
+        end
+        RowLabel(self.UI.LootRows, ("LOST  ·  %s"):format(table.concat(names, ", ")), RED, Enum.TextXAlignment.Left, 1)
+    end
+    self.UI.LootTotal.TextColor3 = TEXT
+    self.UI.LootTotal.Text = "BANK IS SAFE"
+    self.UI.LootHint.Text = "FILAMENTS AND UNLOCKS ARE KEPT — RUN IT BACK"
+    self.UI.LootScreen.Visible = true
+    Log(("Wipe screen: %s"):format(tostring(payload.Reason)))
 end
 
 -- ---------------------------------------------------------------------------
@@ -448,6 +655,7 @@ function RunHudController:KnitStart()
     local runService = Knit.GetService("RunService")
     local artifactService = Knit.GetService("ArtifactService")
     local extractionService = Knit.GetService("ExtractionService")
+    local entityService = Knit.GetService("EntityService")
     local economyService = Knit.GetService("EconomyService")
 
     -- Server-pushed tuning (single source of truth for v1 targets).
@@ -501,6 +709,26 @@ function RunHudController:KnitStart()
     end)
     extractionService.FloorAdvanced:Connect(function(floor: number)
         self:SetFloor(floor)
+    end)
+
+    -- Threat cues (follow-up #4). ThreatHit/WardenGaze carry the attacked
+    -- player as an arg — only react for the local player.
+    entityService.ThreatHit:Connect(function(_entityId: number, _kind: string, player: Player, _lumenDamage: number, _hpDamage: number)
+        if player == self.Player then
+            self:DamageFlash()
+        end
+    end)
+    entityService.WardenGaze:Connect(function(player: Player, flickerSeconds: number)
+        if player == self.Player then
+            self:WardenFlicker(flickerSeconds)
+        end
+    end)
+    entityService.EntityStateChanged:Connect(function(_entityId: number, kind: string, state: string, _payload: any?)
+        if state == "INVESTIGATE" then
+            self:ShowThreatCue("IT HEARD YOU")
+        elseif state == "CHASE" then
+            self:ShowThreatCue(kind == "Warden" and "THE WARDEN SEES YOU" or "IT SEES YOU")
+        end
     end)
 
     -- Bank balance (initial fetch + live updates).
