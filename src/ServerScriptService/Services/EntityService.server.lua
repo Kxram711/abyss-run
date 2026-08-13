@@ -754,7 +754,7 @@ function EntityService:_FireGaze(entity: Entity, player: Player)
     local torsoPos = pos + Vector3.new(0, visual.TorsoCenterY, 0)
     entity.Root.CFrame = CFrame.lookAt(torsoPos, torsoPos + entity.Facing)
     self:_SetState(entity, "PATROL")
-    self.Client.EntityStateChanged:Fire(entity.Id, entity.Kind, "RELOCATED", { Room = room.Name })
+    self.Client.EntityStateChanged:FireAll(entity.Id, entity.Kind, "RELOCATED", { Room = room.Name })
     print(("[EntityService] Warden #%d gaze hit %s (-%d Lumen); relocated to %s"):format(entity.Id, player.Name, cfg.GazeLumenCost, room.Name))
 end
 
@@ -799,7 +799,7 @@ function EntityService:_SetState(entity: Entity, state: string, payload: any?)
         return
     end
     entity.State = state
-    self.Client.EntityStateChanged:Fire(entity.Id, entity.Kind, state, payload)
+    self.Client.EntityStateChanged:FireAll(entity.Id, entity.Kind, state, payload)
 end
 
 function EntityService:_CleanupAll(reason: string)
