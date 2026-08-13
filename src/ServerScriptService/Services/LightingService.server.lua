@@ -54,7 +54,6 @@ local LightingService = Knit.CreateService {
 -- ---------------------------------------------------------------------------
 
 function LightingService:KnitStart()
-    self.FloorService = Knit.GetService("FloorService")
     self.LumenService = Knit.GetService("LumenService")
     self._FloorFolder = nil -- last seen Workspace.Floors child (Folder)
     self._Lights = {} -- { Light: PointLight, Base: number, Current: number, Position: Vector3 }
