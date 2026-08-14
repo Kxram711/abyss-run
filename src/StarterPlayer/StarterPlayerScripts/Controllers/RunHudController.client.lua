@@ -31,6 +31,7 @@
 -- each gated off when inactive.
 local Players = game:GetService("Players")
 local TweenService = game:GetService("TweenService")
+local UserInputService = game:GetService("UserInputService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Knit = require(ReplicatedStorage.Packages.Knit)
 
@@ -129,6 +130,17 @@ local RunHudController = Knit.CreateController {
     FlashTween = nil :: Tween?,
     RegularSlots = {} :: { any },
     SpecialSlotUI = nil :: any,
+    -- Lobby / host-gating state (GDD §2/§3.2).
+    Host = nil :: any?, -- { UserId, Name } from RunService.Host
+    SquadNames = {} :: { string },
+    RunService = nil :: any?,
+    EconomyService = nil :: any?,
+    -- Shop state (GDD §4.6/§6 — lobby-only surface, opened with [B]).
+    ShopOpen = false,
+    ShopCatalog = {} :: { any },
+    ShopRows = {} :: { [string]: any }, -- [upgradeId] -> { Button, CostLabel, RowFrame }
+    ShopFilaments = 0,
+    ShopStatus = "",
 }
 
 -- ---------------------------------------------------------------------------
@@ -320,6 +332,58 @@ function RunHudController:_BuildGui()
     ui.LootHint = Label(ui.LootScreen, "", UDim2.fromScale(0.92, 0.05), UDim2.fromScale(0.5, 0.86), FONT_BODY, 14, DIM, Enum.TextXAlignment.Center) :: TextLabel
     ui.LootHint.AnchorPoint = Vector2.new(0.5, 0)
 
+    -- Lobby / start bar (host gating, GDD §2/§3.2). Bottom-center strip shown
+    -- whenever a run is NOT active (lobby + after extract/wipe = "run it back").
+    -- Sits above the loot screen (later sibling) so the host can start without
+    -- console. In-run the bar hides — the dark doesn't want a menu.
+    ui.LobbyBar = Panel(ui.Root, UDim2.fromOffset(580, 46), UDim2.new(0.5, 0, 1, -14), Vector2.new(0.5, 1))
+    ui.LobbyBar.ZIndex = 4
+    ui.LobbyBar.Visible = false
+    Stroke(ui.LobbyBar, STROKE, 0.75, 1)
+    New("UICorner", { CornerRadius = UDim.new(0, 6) }, ui.LobbyBar)
+    ui.LobbyHost = Label(ui.LobbyBar, "WAITING FOR HOST", UDim2.new(0.32, 0, 1, 0), UDim2.fromOffset(12, 0), FONT_MONO, 13, DIM, Enum.TextXAlignment.Left) :: TextLabel
+    ui.LobbySquad = Label(ui.LobbyBar, "SQUAD —", UDim2.new(0.36, 0, 1, 0), UDim2.new(0.33, 0, 0, 0), FONT_BODY, 12, TEXT, Enum.TextXAlignment.Center) :: TextLabel
+    ui.StartButton = New("TextButton", {
+        Name = "StartRunButton",
+        Size = UDim2.new(0.3, 0, 1, 0),
+        Position = UDim2.new(0.7, 0, 0, 0),
+        AnchorPoint = Vector2.new(0, 0),
+        BackgroundColor3 = Color3.fromRGB(30, 26, 18),
+        BackgroundTransparency = 0.1,
+        BorderSizePixel = 0,
+        Text = "START RUN",
+        Font = FONT_HEAD,
+        TextSize = 15,
+        TextColor3 = AMBER,
+        Visible = false,
+    }, ui.LobbyBar) :: TextButton
+    Stroke(ui.StartButton, AMBER, 0.5, 1)
+    New("UICorner", { CornerRadius = UDim.new(0, 6) }, ui.StartButton)
+    ui.StartButton.Activated:Connect(function()
+        self:RequestStartRun()
+    end)
+    ui.WaitingHint = Label(ui.LobbyBar, "WAITING FOR HOST TO START", UDim2.new(0.3, 0, 1, 0), UDim2.new(0.7, 0, 0, 0), FONT_BODY, 12, DIM, Enum.TextXAlignment.Center) :: TextLabel
+
+    -- Supply Depot shop (GDD §4.6/§6): 5 gear upgrades, Filaments only, no
+    -- monetization this pass (revive-pass is the publish-time step). Opened
+    -- with [B] in any non-run state; lobby-only surface per §6 policy.
+    ui.Shop = Panel(ui.Root, UDim2.fromOffset(600, 500), UDim2.fromScale(0.5, 0.5), Vector2.new(0.5, 0.5))
+    ui.Shop.ZIndex = 6
+    ui.Shop.BackgroundTransparency = 0.12
+    ui.Shop.Visible = false
+    Stroke(ui.Shop, AMBER, 0.45, 1)
+    New("UICorner", { CornerRadius = UDim.new(0, 8) }, ui.Shop)
+    ui.ShopTitle = Label(ui.Shop, "SUPPLY DEPOT", UDim2.new(1, 0, 0, 34), UDim2.fromOffset(0, 14), FONT_HEAD, 22, TEXT, Enum.TextXAlignment.Center) :: TextLabel
+    ui.ShopSub = Label(ui.Shop, "PERMANENT GEAR — FILAMENTS ONLY", UDim2.new(1, 0, 0, 20), UDim2.fromOffset(0, 48), FONT_BODY, 12, DIM, Enum.TextXAlignment.Center) :: TextLabel
+    ui.ShopBalance = Label(ui.Shop, "F 0", UDim2.new(1, -24, 0, 22), UDim2.new(1, -12, 0, 10), FONT_MONO, 16, PALE_GREEN, Enum.TextXAlignment.Right) :: TextLabel
+    ui.ShopRowsHolder = New("Frame", {
+        Size = UDim2.new(1, -24, 0, 300),
+        Position = UDim2.fromOffset(12, 76),
+        BackgroundTransparency = 1,
+    }, ui.Shop) :: Frame
+    ui.ShopStatus = Label(ui.Shop, "", UDim2.new(1, -24, 0, 20), UDim2.fromOffset(12, 384), FONT_BODY, 12, AMBER, Enum.TextXAlignment.Center) :: TextLabel
+    ui.ShopCloseHint = Label(ui.Shop, "[B] CLOSE", UDim2.new(1, -24, 0, 18), UDim2.fromOffset(12, 468), FONT_BODY, 11, DIM, Enum.TextXAlignment.Right) :: TextLabel
+
     Log("HUD built")
 end
 
@@ -462,6 +526,9 @@ function RunHudController:SetRunState(state: string, payload: any?)
     local inRun = state == "in-run"
     self.UI.CarryRow.Visible = inRun
     self.UI.LumenBar.Visible = inRun
+    -- Lobby/start bar: visible whenever a run is NOT active, so the host can
+    -- start a fresh run AND run it back after extract/wipe (§3.2).
+    self.UI.LobbyBar.Visible = not inRun
     self.UI.RunStateLabel.Text = string.upper(state):gsub("%-", " ")
     if state == "lobby" then
         self.UI.FloorNumber.Text = "—"
@@ -478,6 +545,207 @@ function RunHudController:SetRunState(state: string, payload: any?)
         self:ShowWipeScreen(payload)
     end
     Log(("Run state -> %s"):format(state))
+end
+
+-- ---------------------------------------------------------------------------
+-- Lobby / host gating (GDD §2/§3.2)
+-- ---------------------------------------------------------------------------
+-- The START RUN button belongs to the host (first player in the server). When
+-- the server has no host or the local player isn't it, show the waiting state.
+function RunHudController:UpdateLobby()
+    local ui = self.UI
+    local host = self.Host
+    if type(host) ~= "table" then
+        ui.LobbyHost.Text = "WAITING FOR HOST"
+        ui.LobbyHost.TextColor3 = DIM
+        ui.StartButton.Visible = false
+        ui.WaitingHint.Visible = true
+        ui.WaitingHint.Text = "WAITING FOR HOST TO START"
+    else
+        ui.LobbyHost.Text = ("HOST  %s"):format(tostring(host.Name))
+        ui.LobbyHost.TextColor3 = AMBER
+        local isHost = self.Player ~= nil and host.UserId == self.Player.UserId
+        ui.StartButton.Visible = isHost
+        ui.WaitingHint.Visible = not isHost
+        ui.WaitingHint.Text = isHost and "YOU QUEUE THE RUN" or "WAITING FOR HOST TO START"
+    end
+    local names = self.SquadNames
+    ui.LobbySquad.Text = #names > 0 and ("SQUAD  %s"):format(table.concat(names, " · ")) or "SQUAD  —"
+end
+
+--- Host clicks START RUN → RunService.StartRun RPC (server re-validates host).
+function RunHudController:RequestStartRun()
+    local runService = self.RunService
+    if runService == nil then
+        return
+    end
+    runService:StartRun():andThen(function(result: any)
+        if type(result) == "table" and not result.Started then
+            Log(("StartRun rejected: %s"):format(tostring(result.Reason)))
+            -- e.g. another player grabbed host, or a run is somehow active —
+            -- the next host event re-renders the bar.
+        end
+    end):catch(function(err: any)
+        warn("[RunHudController] StartRun failed:", err)
+    end)
+end
+
+-- ---------------------------------------------------------------------------
+-- Supply Depot shop (GDD §4.6/§6)
+-- ---------------------------------------------------------------------------
+
+--- Builds the 5 gear rows once (catalog is server-authoritative; the frame
+--- exists, the rows are filled when the catalog lands).
+function RunHudController:BuildShopRows()
+    local holder = self.UI.ShopRowsHolder :: Frame
+    for i, item in ipairs(self.ShopCatalog) do
+        local row = New("Frame", {
+            Size = UDim2.new(1, 0, 0, 56),
+            Position = UDim2.fromOffset(0, (i - 1) * 60),
+            BackgroundColor3 = Color3.fromRGB(14, 16, 18),
+            BackgroundTransparency = 0.25,
+            BorderSizePixel = 0,
+        }, holder) :: Frame
+        Stroke(row, STROKE, 0.82, 1)
+        New("UICorner", { CornerRadius = UDim.new(0, 6) }, row)
+        Label(row, item.Name, UDim2.new(0.52, 0, 0, 20), UDim2.fromOffset(12, 6), FONT_HEAD, 15, TEXT, Enum.TextXAlignment.Left)
+        Label(row, item.Description, UDim2.new(0.52, 0, 0, 16), UDim2.fromOffset(12, 28), FONT_BODY, 11, DIM, Enum.TextXAlignment.Left)
+        local cost = Label(row, ("%dF"):format(item.Cost), UDim2.new(0.16, 0, 1, 0), UDim2.new(0.5, 0, 0, 0), FONT_MONO, 14, AMBER, Enum.TextXAlignment.Center) :: TextLabel
+        local button = New("TextButton", {
+            Name = "Buy_" .. item.Id,
+            Size = UDim2.new(0.2, 0, 0, 34),
+            Position = UDim2.new(0.78, 0, 0.5, 0),
+            AnchorPoint = Vector2.new(0, 0.5),
+            BackgroundColor3 = Color3.fromRGB(30, 26, 18),
+            BackgroundTransparency = 0.15,
+            BorderSizePixel = 0,
+            Text = "BUY",
+            Font = FONT_HEAD,
+            TextSize = 13,
+            TextColor3 = AMBER,
+        }, row) :: TextButton
+        Stroke(button, AMBER, 0.6, 1)
+        New("UICorner", { CornerRadius = UDim.new(0, 4) }, button)
+        local id = item.Id
+        button.Activated:Connect(function()
+            self:BuyUpgrade(id)
+        end)
+        self.ShopRows[id] = { Row = row, CostLabel = cost, Button = button }
+    end
+end
+
+--- Re-reads profile + catalog and repaints every row (owned / affordable).
+function RunHudController:RefreshShop()
+    local economyService = self.EconomyService
+    if economyService == nil then
+        return
+    end
+    economyService:GetProfile():andThen(function(profile: any)
+        if type(profile) ~= "table" then
+            return
+        end
+        local filaments = type(profile.Filaments) == "number" and profile.Filaments or 0
+        self.ShopFilaments = filaments
+        self.UI.ShopBalance.Text = ("F %s"):format(tostring(math.floor(filaments)))
+        local owned = type(profile.Upgrades) == "table" and profile.Upgrades or {}
+        for _, item in ipairs(self.ShopCatalog) do
+            local row = self.ShopRows[item.Id]
+            if row ~= nil then
+                if owned[item.Id] then
+                    row.Button.Text = "OWNED"
+                    row.Button.TextColor3 = DIM
+                    row.Button.BackgroundColor3 = Color3.fromRGB(16, 18, 20)
+                    local stroke = row.Button:FindFirstChildOfClass("UIStroke")
+                    if stroke then
+                        stroke.Color = DIM
+                        stroke.Transparency = 0.7
+                    end
+                    row.CostLabel.TextColor3 = PALE_GREEN
+                    row.CostLabel.Text = "OWNED"
+                else
+                    row.Button.Text = "BUY"
+                    row.Button.TextColor3 = AMBER
+                    row.Button.BackgroundColor3 = Color3.fromRGB(30, 26, 18)
+                    local stroke = row.Button:FindFirstChildOfClass("UIStroke")
+                    if stroke then
+                        stroke.Color = AMBER
+                        stroke.Transparency = 0.6
+                    end
+                    row.CostLabel.TextColor3 = filaments >= item.Cost and AMBER or RED
+                    row.CostLabel.Text = ("%dF"):format(item.Cost)
+                end
+            end
+        end
+    end):catch(function(err: any)
+        warn("[RunHudController] RefreshShop failed:", err)
+    end)
+end
+
+--- Buy click → server RPC; repaint on result, surface rejections briefly.
+function RunHudController:BuyUpgrade(upgradeId: string)
+    local economyService = self.EconomyService
+    if economyService == nil then
+        return
+    end
+    economyService:PurchaseUpgrade(upgradeId):andThen(function(result: any)
+        if type(result) ~= "table" then
+            return
+        end
+        if result.Success then
+            self.ShopStatus = ("%s MOUNTED"):format(tostring(result.Upgrade.Name))
+        elseif result.Reason == "insufficient_funds" then
+            self.ShopStatus = ("NEED %dF — YOU HAVE %dF"):format(result.Cost or 0, result.Balance or 0)
+        elseif result.Reason == "already_owned" then
+            self.ShopStatus = "ALREADY OWNED"
+        else
+            self.ShopStatus = tostring(result.Reason):upper()
+        end
+        self.UI.ShopStatus.Text = self.ShopStatus
+        self:RefreshShop()
+    end):catch(function(err: any)
+        warn("[RunHudController] PurchaseUpgrade failed:", err)
+    end)
+end
+
+function RunHudController:OpenShop()
+    if self.RunState == "in-run" then
+        return -- §6: monetization surfaces live in the lobby, never mid-run
+    end
+    if self.ShopOpen then
+        return
+    end
+    if #self.ShopCatalog == 0 then
+        -- Fetch the catalog once (server-authoritative), then build the rows.
+        local economyService = self.EconomyService
+        if economyService ~= nil then
+            economyService:GetShopCatalog():andThen(function(catalog: any)
+                if type(catalog) == "table" then
+                    self.ShopCatalog = catalog
+                    self:BuildShopRows()
+                    self:RefreshShop()
+                end
+            end):catch(function(err: any)
+                warn("[RunHudController] GetShopCatalog failed:", err)
+            end)
+        end
+    else
+        self:RefreshShop()
+    end
+    self.ShopOpen = true
+    self.UI.Shop.Visible = true
+end
+
+function RunHudController:CloseShop()
+    self.ShopOpen = false
+    self.UI.Shop.Visible = false
+end
+
+function RunHudController:ToggleShop()
+    if self.ShopOpen then
+        self:CloseShop()
+    else
+        self:OpenShop()
+    end
 end
 
 -- ---------------------------------------------------------------------------
@@ -653,10 +921,12 @@ function RunHudController:KnitStart()
 
     local lumenService = Knit.GetService("LumenService")
     local runService = Knit.GetService("RunService")
+    self.RunService = runService
     local artifactService = Knit.GetService("ArtifactService")
     local extractionService = Knit.GetService("ExtractionService")
     local entityService = Knit.GetService("EntityService")
     local economyService = Knit.GetService("EconomyService")
+    self.EconomyService = economyService
 
     -- Server-pushed tuning (single source of truth for v1 targets).
     lumenService.Config:Observe(function(config: any)
@@ -701,11 +971,35 @@ function RunHudController:KnitStart()
     end)
     runService.RunStateChanged:Connect(function(state: string, payload: any?)
         self:SetRunState(state, payload)
+        if state == "in-run" then
+            self:CloseShop() -- §6: no shop mid-run
+        end
     end)
     runService.RunInfo:Observe(function(info: any)
-        if type(info) == "table" and type(info.Floor) == "number" then
+        if type(info) ~= "table" then
+            return
+        end
+        if type(info.Floor) == "number" then
             self:SetFloor(info.Floor)
         end
+        -- Lobby bar: squad list + host changes ride along in RunInfo too.
+        if type(info.Squad) == "table" then
+            self.SquadNames = info.Squad
+        end
+        if type(info.Host) == "table" then
+            self.Host = info.Host
+        end
+        self:UpdateLobby()
+    end)
+    -- Host changes (dedicated surface — fires on promotion/clear, incl. when
+    -- the current host leaves and the next player takes over).
+    runService.Host:Observe(function(host: any?)
+        self.Host = host
+        self:UpdateLobby()
+    end)
+    runService.HostChanged:Connect(function(host: any?)
+        self.Host = host
+        self:UpdateLobby()
     end)
     extractionService.FloorAdvanced:Connect(function(floor: number)
         self:SetFloor(floor)
@@ -739,6 +1033,19 @@ function RunHudController:KnitStart()
     end)
     economyService.FilamentsChanged:Connect(function(balance: number)
         self:SetFilaments(balance)
+        if self.ShopOpen then
+            self.UI.ShopBalance.Text = ("F %s"):format(tostring(math.floor(balance)))
+        end
+    end)
+
+    -- [B] opens/closes the Supply Depot (lobby-only surface, GDD §6).
+    UserInputService.InputBegan:Connect(function(input: InputObject, gameProcessed: boolean)
+        if gameProcessed then
+            return
+        end
+        if input.UserInputType == Enum.UserInputType.Keyboard and input.KeyCode == Enum.KeyCode.B then
+            self:ToggleShop()
+        end
     end)
 
     Log(("Started for %s"):format(self.Player.Name))

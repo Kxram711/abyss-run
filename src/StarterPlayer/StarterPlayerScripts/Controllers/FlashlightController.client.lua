@@ -29,6 +29,7 @@ local FlashlightController = Knit.CreateController {
     FlickerThreshold = DEFAULT_FLICKER_THRESHOLD,
     Player = nil :: Player?,
     StutterUntil = 0, -- os.clock() while the Warden gaze stutter owns the beam
+    ApertureLens = false, -- GDD §4.6: beam wider +15% (owned via EconomyService)
 }
 
 local function Log(msg: string)
@@ -97,6 +98,25 @@ function FlashlightController:KnitStart()
         end
     end)
 
+    -- Aperture Lens (GDD §4.6): beam wider +15% for owners. Read once, then
+    -- re-read when the persisted profile lands or a purchase happens — the
+    -- re-apply happens on the next SetupCharacter/beam build.
+    local economyService = Knit.GetService("EconomyService")
+    local function SyncGear()
+        economyService:GetProfile():andThen(function(profile: any)
+            if type(profile) == "table" and type(profile.Upgrades) == "table" then
+                self.ApertureLens = profile.Upgrades.aperture_lens == true
+                self:ApplyLensToBeam()
+            end
+        end):catch(function(err: any)
+            warn("[FlashlightController] GetProfile failed:", err)
+        end)
+    end
+    economyService.UpgradesChanged:Connect(function()
+        SyncGear()
+    end)
+    SyncGear()
+
     -- Flicker heartbeat (client-side visual only).
     task.spawn(function()
         self:FlickerLoop()
@@ -127,6 +147,9 @@ function FlashlightController:SetupCharacter(character: Model)
     beam.Brightness = 2.5
     beam.Range = 70
     beam.Angle = 65
+    if self.ApertureLens then
+        beam.Angle = 65 * 1.15 -- GDD §4.6 Aperture Lens: beam wider +15%
+    end
     beam.Color = Color3.fromRGB(255, 244, 214) -- warm beam; skins come later
     beam.Enabled = false
     beam.Parent = part
@@ -134,6 +157,15 @@ function FlashlightController:SetupCharacter(character: Model)
 
     -- Default ON at spawn: the squad starts its run with the beams lit.
     self:SetBeamOn(true, "spawn")
+end
+
+--- Applies the Aperture Lens angle to an existing beam (called when ownership
+--- lands after the beam was already built).
+function FlashlightController:ApplyLensToBeam()
+    if self.Beam == nil then
+        return
+    end
+    self.Beam.Angle = self.ApertureLens and (65 * 1.15) or 65
 end
 
 function FlashlightController:SetBeamOn(on: boolean, reason: string)

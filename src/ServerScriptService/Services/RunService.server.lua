@@ -15,13 +15,17 @@
 --     lost, the run is a wipe (GDD §4.7: lose run loot only — permanent
 --     unlocks/banked Filaments are never touched).
 --
--- Knit Comm surface (server -> client; NO GUI this pass):
+-- Knit Comm surface (server -> client):
 --   RunStateChanged(state, payload?)   "lobby" | "in-run" | "extracted" |
 --       "wiped" — payload carries results (reward breakdown / wipe reason)
 --   Property RunState                  current state string
 --   Property RunInfo                   { RunId, Seed, Floor, SquadSize,
---       SquadAlive, SquadLost, Squad } snapshot (Observe for lobby/HUD)
---   RPC StartRun(seed?)                starts a fresh run (anyone this pass)
+--       SquadAlive, SquadLost, Squad, Host } snapshot (Observe for lobby/HUD)
+--   Property Host                      { UserId, Name } — the lobby host
+--   Signal HostChanged(hostInfo)       nil when the server has no host
+--   RPC StartRun(seed?)                starts a fresh run — HOST ONLY (the
+--                                      first player in the server; non-hosts
+--                                      get { Started = false, Reason = "not_host" })
 --   RPC GetRunState()                  current RunInfo
 
 local Players = game:GetService("Players")
@@ -38,7 +42,9 @@ local RunService = Knit.CreateService {
     Client = {
         RunStateChanged = Knit.CreateSignal(), -- (state: string, payload: any?)
         RunState = Knit.CreateProperty(LOBBY),
-        RunInfo = Knit.CreateProperty(nil), -- { RunId, Seed, Floor, SquadSize, SquadAlive, SquadLost, Squad }
+        RunInfo = Knit.CreateProperty(nil), -- { RunId, Seed, Floor, SquadSize, SquadAlive, SquadLost, Squad, Host }
+        Host = Knit.CreateProperty(nil), -- { UserId, Name } — lobby host (first player in the server)
+        HostChanged = Knit.CreateSignal(), -- (hostInfo: { UserId, Name }?) — nil when no host
     },
 }
 
@@ -46,7 +52,16 @@ local RunService = Knit.CreateService {
 -- Client-callable RPCs (Knit injects the calling Player as first arg)
 -- ---------------------------------------------------------------------------
 
+--- START RUN is HOST-GATED: the first player in the server owns the run
+--- (GDD §2/§3.2: host = squad leader, queues the run). Non-hosts get a
+--- "waiting for host" rejection; the lobby UI shows them that state.
 function RunService.Client:StartRun(player: Player, seed: number?)
+    if RunService.Host == nil then
+        return { Started = false, Reason = "no_host" }
+    end
+    if player ~= RunService.Host then
+        return { Started = false, Reason = "not_host" }
+    end
     return RunService:StartRun(seed)
 end
 
@@ -70,8 +85,33 @@ function RunService:KnitStart()
     self.ArtifactService = Knit.GetService("ArtifactService")
     self.EntityService = Knit.GetService("EntityService")
 
+    -- Host = first player in the server (GDD §2/§3.2: host owns the run).
+    -- A player already in the server when this starts (late server start) is
+    -- the host; otherwise PlayerAdded assigns it.
+    self.Host = nil
+    local players = Players:GetPlayers()
+    if #players > 0 then
+        self:_SetHost(players[1])
+    end
+
+    Players.PlayerAdded:Connect(function(player)
+        if self.Host == nil then
+            self:_SetHost(player)
+        end
+    end)
     Players.PlayerRemoving:Connect(function(player)
         self:_OnPlayerLeaving(player)
+        if self.Host == player then
+            -- Host left: promote the next player in the server (or none).
+            local nextHost: Player? = nil
+            for _, p in Players:GetPlayers() do
+                if p ~= player then
+                    nextHost = p
+                    break
+                end
+            end
+            self:_SetHost(nextHost)
+        end
     end)
 
     self:_PublishState(LOBBY)
@@ -203,6 +243,33 @@ function RunService:_OnPlayerLeaving(player: Player)
 end
 
 -- ---------------------------------------------------------------------------
+-- Host (lobby ownership, GDD §2/§3.2)
+-- ---------------------------------------------------------------------------
+
+--- Assigns the lobby host (nil clears it). Pushes a serializable { UserId,
+--- Name } to clients via the Host property + HostChanged signal, and keeps
+--- RunInfo fresh so lobby UIs bound to RunInfo also see host changes.
+function RunService:_SetHost(player: Player?)
+    self.Host = player
+    local info = nil
+    if player ~= nil then
+        info = { UserId = player.UserId, Name = player.Name }
+    end
+    self.Client.Host:Set(info)
+    self.Client.HostChanged:FireAll(info)
+    self.Client.RunInfo:Set(self:_BuildRunInfo())
+    if info ~= nil then
+        print(("[RunService] lobby host: %s"):format(info.Name))
+    else
+        print("[RunService] lobby host: none (server empty)")
+    end
+end
+
+function RunService:GetHost(): Player?
+    return self.Host
+end
+
+-- ---------------------------------------------------------------------------
 -- Helpers
 -- ---------------------------------------------------------------------------
 
@@ -220,6 +287,7 @@ function RunService:_BuildRunInfo(): any
         SquadAlive = self.SquadAliveCount,
         SquadLost = #self.Squad - self.SquadAliveCount,
         Squad = squadNames,
+        Host = self.Host ~= nil and { UserId = self.Host.UserId, Name = self.Host.Name } or nil,
     }
 end
 
