@@ -34,11 +34,20 @@
 --   EntitySpawned(entityId, kind, floor)
 --   EntityStateChanged(entityId, kind, state, payload?)   patrol / investigate
 --       (alert cue) / chase / attack / stagger / gaze / relocate ...
+--       payload ALWAYS carries { Floor, Position } (added by the atmosphere
+--       pass) plus any state-specific fields — clients use Floor to gate
+--       "the local player's floor" and Position to localize VFX/audio.
 --   EntityDespawned(entityId, kind, reason)
 --   ThreatHit(entityId, kind, player, lumenDamage, hpDamage)   hpDamage is the
 --       GDD Darkness-mode payload (20) fired for the future health system
 --   WardenGaze(player, flickerSeconds)   client VFX cue (visibility cut 40%,
 --       GDD §4.5) — applied by a later client delegation
+--
+-- Server-side seam (atmosphere pass): a registered state listener
+-- (SetStateListener) is notified on every transition with (entity, state,
+-- payload) — the Comm RemoteSignal is client-only, so LightingService uses
+-- this to drive world-space VFX (gaze light stutter, presence pulse) without
+-- polling. Additive; unused when no listener is registered.
 
 local Players = game:GetService("Players")
 local Workspace = game:GetService("Workspace")
@@ -799,7 +808,22 @@ function EntityService:_SetState(entity: Entity, state: string, payload: any?)
         return
     end
     entity.State = state
-    self.Client.EntityStateChanged:FireAll(entity.Id, entity.Kind, state, payload)
+    -- Always carry floor + position so client VFX/audio can gate on "the local
+    -- player's floor" and localize one-shots (atmosphere pass; additive fields —
+    -- the HUD ignores them). payload is always a fresh table here.
+    local p = payload or {}
+    p.Floor = entity.FloorState.FloorNumber
+    p.Position = entity.Root.Position
+    self.Client.EntityStateChanged:FireAll(entity.Id, entity.Kind, state, p)
+    if self._StateListener ~= nil then
+        self._StateListener(entity, state, p)
+    end
+end
+
+--- Registers a server-side listener for state transitions (see header).
+--- LightingService uses this for world-space VFX. Only one listener; additive.
+function EntityService:SetStateListener(listener: (entity: any, state: string, payload: any?) -> ())
+    self._StateListener = listener
 end
 
 function EntityService:_CleanupAll(reason: string)
