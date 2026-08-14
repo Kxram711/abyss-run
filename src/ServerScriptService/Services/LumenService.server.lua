@@ -33,10 +33,15 @@ local CONFIG = {
     PassiveDrainFloor1 = 0.5, -- L/s on Floor 1 (v1 target)
     DrainMultiplierPerFloor = 1.12, -- x1.12 per floor deeper (v1 target)
     FlashlightDrainPerPlayer = 0.3, -- extra L/s per active beam (v1 target)
+    SprintDrainPerPlayer = 0.4, -- extra L/s per sprinting player (GDD §4.2 v1 target)
     WellRecharge = 40, -- Lumen per Well use (v1 target)
     CellRecharge = 25, -- Lumen per Lumen Cell (v1 target)
     ReviveCost = 30, -- Lumen from the pool to revive a teammate (v1 target)
     StarterCells = 1, -- debug starter loadout so the slice is testable
+    -- Cell capacity (GDD §4.1: max 3 bought pre-run; §4.6 gear modifies it).
+    BaseCellSlots = 3,
+    RationPackExtraSlots = 1, -- Ration Pack: +1 consumable slot (3 -> 4)
+    LongCellExtraSlots = 2, -- Long-Cell Carrier: 3 -> 5
     FlickerThreshold = 10, -- client beams flicker below this pool value (v1 target)
     TickInterval = 0.5, -- economy tick in seconds
 }
@@ -77,9 +82,11 @@ function LumenService:KnitStart()
     self.InDarkness = false
     self.FlashlightsOn = {} -- [Player] -> boolean
     self.Cells = {} -- [Player] -> number
+    self.Sprinting = {} -- [Player] -> boolean (movement pass reports sprint; seam live for Sprint Regulator)
     self.UsedWells = {} -- [BasePart] -> true (one use per Well, GDD §4.2)
     self.ActivePlayerCount = 0
     self.FloorService = Knit.GetService("FloorService")
+    self.EconomyService = Knit.GetService("EconomyService") -- gear seams (§4.6)
 
     -- Push shared tuning to clients (single source of truth for v1 targets).
     self.Client.Config:Set({
@@ -152,6 +159,25 @@ function LumenService:GetTotalDrainPerSecond(): number
         if on then
             drain += CONFIG.FlashlightDrainPerPlayer
         end
+    end
+    -- Sprint tax (GDD §4.2): +0.4 L/s per sprinting player. The movement pass
+    -- reports sprint state into self.Sprinting; until then the seam is live but
+    -- empty (Sprint Regulator's 0.4 -> 0.3 read is still testable via
+    -- GetSprintDrainPerSecond).
+    for player, sprinting in pairs(self.Sprinting) do
+        if sprinting then
+            drain += self:GetSprintDrainPerSecond(player)
+        end
+    end
+    return drain
+end
+
+--- Sprint Lumen tax per player (GDD §4.2 v1 target: +0.4 L/s). Sprint
+--- Regulator (GDD §4.6) cuts it to 0.3 L/s for owners.
+function LumenService:GetSprintDrainPerSecond(player: Player): number
+    local drain = CONFIG.SprintDrainPerPlayer
+    if self.EconomyService ~= nil and self.EconomyService:HasUpgrade(player, "sprint_regulator") then
+        drain = 0.3
     end
     return drain
 end
@@ -354,6 +380,22 @@ end
 
 function LumenService:GetCellCount(player: Player): number
     return self.Cells[player] or 0
+end
+
+--- Max Lumen Cells a player can carry (GDD §4.1: 3 bought pre-run; §4.6 gear:
+--- Ration Pack +1 slot, Long-Cell Carrier 3 -> 5). Enforced at pre-run buy
+--- time (a later delegation) — the pre-run buy will clamp to this.
+function LumenService:GetMaxCells(player: Player): number
+    local max = CONFIG.BaseCellSlots
+    if self.EconomyService ~= nil then
+        if self.EconomyService:HasUpgrade(player, "ration_pack") then
+            max += CONFIG.RationPackExtraSlots
+        end
+        if self.EconomyService:HasUpgrade(player, "long_cell_carrier") then
+            max += CONFIG.LongCellExtraSlots
+        end
+    end
+    return max
 end
 
 -- ---------------------------------------------------------------------------

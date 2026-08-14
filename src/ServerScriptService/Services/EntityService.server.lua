@@ -66,6 +66,7 @@ local CONFIG = {
         SightConeHalfAngle = 60, -- 120-degree sight cone
         BeamSenseRange = 25, -- light-sense: your beam is visible from farther than you are
         NoiseRangeWalk = 15, -- walk noise radius (crouch 6 not implemented server-side yet)
+        NoiseRangeCrouch = 6, -- GDD §4.5 crouch noise (movement pass reports crouch; Quiet Treads halves)
         NoiseRangeSprint = 30, -- sprint noise radius (sprint system not in slice)
         AttackRange = 3.5, -- (v1 target) reach of the attack
         AttackWindup = 1.5, -- s of windup before the hit (GDD §4.5)
@@ -195,6 +196,7 @@ local EntityService = Knit.CreateService {
 function EntityService:KnitStart()
     self.LumenService = Knit.GetService("LumenService")
     self.FloorService = Knit.GetService("FloorService")
+    self.EconomyService = Knit.GetService("EconomyService") -- gear seams (GDD §4.6)
     self.Entities = {} -- [entityId] -> Entity
     self.NextEntityId = 1
     self.ActiveFloor = nil :: FloorState?
@@ -206,6 +208,30 @@ function EntityService:KnitStart()
     task.spawn(function()
         self:_TickLoop()
     end)
+end
+
+-- ---------------------------------------------------------------------------
+-- Gear seams (GDD §4.6) — effects are read-live from EconomyService ownership
+-- ---------------------------------------------------------------------------
+
+--- Wanderer stagger duration. Aperture Lens adds +0.5s when the player who
+--- landed the stagger owns it (GDD §4.6: "focus stagger +0.5s").
+function EntityService:GetStaggerDuration(focusingPlayer: Player?): number
+    local duration = CONFIG.Wanderer.StaggerDuration
+    if focusingPlayer ~= nil and self.EconomyService ~= nil
+        and self.EconomyService:HasUpgrade(focusingPlayer, "aperture_lens") then
+        duration += 0.5
+    end
+    return duration
+end
+
+--- Sneak-noise multiplier. Quiet Treads halves it (GDD §4.6: crouch noise
+--- 6 -> 3 studs). Applied to the crouch-speed branch of Wanderer detection.
+function EntityService:GetNoiseMultiplier(player: Player): number
+    if self.EconomyService ~= nil and self.EconomyService:HasUpgrade(player, "quiet_treads") then
+        return 0.5
+    end
+    return 1
 end
 
 -- The floor monitor is the single source of truth for "the floor changed":
@@ -468,7 +494,7 @@ function EntityService:_TickWanderer(entity: Entity, dt: number)
         if entity.FocusTime >= cfg.StaggerFocusTime then
             entity.PreStaggerState = entity.State
             entity.FocusTime = 0
-            entity.StaggerRemaining = cfg.StaggerDuration
+            entity.StaggerRemaining = self:GetStaggerDuration(focusedPlayer)
             self:_SetState(entity, "STAGGER")
             return
         end
@@ -613,13 +639,21 @@ function EntityService:_DetectWanderer(entity: Entity): (Player?, string?, Vecto
                 bestScore, bestPlayer, bestReason, bestPos, bestSeen = score, player, "light", targetPos, false
             end
         end
-        -- Noise (movement-derived; crouch 6 is not implemented server-side yet)
+        -- Noise (movement-derived). Crouch (10 stud/s, GDD §4.1) has no native
+        -- server state yet — crouch-speed movement falls into the walk branch;
+        -- Quiet Treads (GDD §4.6) halves the range for sub-walk movement so the
+        -- upgrade is observable in the slice. A dedicated crouch flag (base
+        -- NoiseRangeCrouch, then halved) lands with the movement pass and
+        -- reuses GetNoiseMultiplier.
         local speed = self:_PlayerSpeed(char)
         local noiseRange = 0
         if speed >= 20 then
             noiseRange = cfg.NoiseRangeSprint
         elseif speed > 0.5 then
             noiseRange = cfg.NoiseRangeWalk
+            if speed < 16 then
+                noiseRange = noiseRange * self:GetNoiseMultiplier(player) -- crouch-speed: Quiet Treads
+            end
         end
         if noiseRange > 0 and dist <= noiseRange and self:_HasLOS(entityPos, targetPos, entity) then
             local score = noiseRange - dist

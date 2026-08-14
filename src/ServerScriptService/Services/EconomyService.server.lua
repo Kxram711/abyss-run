@@ -16,18 +16,71 @@
 --                                          the persisted profile lands (so the
 --                                          HUD/shop refresh from 0 to the real
 --                                          balance on join)
+--   UpgradesChanged(player)                fired when owned upgrades change or
+--                                          the persisted upgrades land (client
+--                                          effect seams — e.g. Aperture Lens —
+--                                          re-read via GetProfile)
 --   RPC GetFilaments()                     current balance
 --   RPC GetProfile()                       { Filaments, Upgrades } for the shop
+--   RPC GetShopCatalog()                   the 5 slice gear upgrades (GDD §4.6)
+--   RPC PurchaseUpgrade(id)                buy a gear upgrade (validates funds,
+--                                          deducts, records owned, persists)
 
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local DataStoreService = game:GetService("DataStoreService")
 local Knit = require(ReplicatedStorage.Packages.Knit)
 
+-- GDD §4.6 slice gear catalog (exact names, effects, costs). Effects are
+-- applied read-live by the owning service seams (they check HasUpgrade), so a
+-- purchase takes effect immediately without a rebuild:
+--   aperture_lens      -> FlashlightController beam angle +15% (client visual);
+--                         EntityService stagger +0.5s
+--   ration_pack        -> LumenService GetMaxCells +1 (3 -> 4)
+--   long_cell_carrier  -> LumenService GetMaxCells +2 (3 -> 5)
+--   quiet_treads       -> EntityService crouch-speed noise halved (6 -> 3 studs
+--                         on the crouch branch; crouch detection lands with the
+--                         movement pass)
+--   sprint_regulator   -> LumenService GetSprintDrainPerSecond 0.4 -> 0.3 L/s
+local UPGRADES = {
+    aperture_lens = {
+        Id = "aperture_lens",
+        Name = "Aperture Lens",
+        Cost = 400,
+        Description = "Beam wider +15% · focus stagger +0.5s",
+    },
+    ration_pack = {
+        Id = "ration_pack",
+        Name = "Ration Pack",
+        Cost = 600,
+        Description = "+1 consumable slot",
+    },
+    long_cell_carrier = {
+        Id = "long_cell_carrier",
+        Name = "Long-Cell Carrier",
+        Cost = 1200,
+        Description = "Lumen Cell carry 3 → 5",
+    },
+    quiet_treads = {
+        Id = "quiet_treads",
+        Name = "Quiet Treads",
+        Cost = 1200,
+        Description = "Crouch noise 6 → 3 studs",
+    },
+    sprint_regulator = {
+        Id = "sprint_regulator",
+        Name = "Sprint Regulator",
+        Cost = 1800,
+        Description = "Sprint Lumen tax 0.4 → 0.3 L/s",
+    },
+}
+local UPGRADE_ORDER = { "aperture_lens", "ration_pack", "long_cell_carrier", "quiet_treads", "sprint_regulator" }
+
 local EconomyService = Knit.CreateService {
     Name = "EconomyService",
     Client = {
         FilamentsChanged = Knit.CreateSignal(), -- (player: Player, newBalance: number)
+        UpgradesChanged = Knit.CreateSignal(), -- (player: Player) — re-read GetProfile
     },
 }
 
@@ -55,6 +108,19 @@ end
 
 function EconomyService.Client:GetProfile(player: Player)
     return EconomyService:GetProfile(player)
+end
+
+function EconomyService.Client:GetShopCatalog(player: Player)
+    return EconomyService:GetShopCatalog()
+end
+
+--- Buy a gear upgrade (GDD §4.6). Server-authoritative: validates the id and
+--- funds, deducts, records ownership, persists. Returns:
+---   { Success = true, Balance, Upgrade }
+---   { Success = false, Reason = "unknown_upgrade" | "already_owned" |
+---     "insufficient_funds", Cost?, Balance? }
+function EconomyService.Client:PurchaseUpgrade(player: Player, upgradeId: string)
+    return EconomyService:PurchaseUpgradeForPlayer(player, upgradeId)
 end
 
 -- ---------------------------------------------------------------------------
@@ -167,6 +233,9 @@ function EconomyService:_LoadProfile(player: Player, profile: any)
     end
     -- Push the persisted balance to the HUD/shop (they may have read 0).
     self.Client.FilamentsChanged:Fire(player, profile.Filaments)
+    -- Persisted upgrades landed: client effect seams (Aperture Lens beam, etc.)
+    -- re-read ownership via GetProfile.
+    self.Client.UpgradesChanged:Fire(player)
     if profile.Dirty then
         self:_ScheduleSave(player, profile)
     end
@@ -258,6 +327,62 @@ function EconomyService:SetUpgradeOwned(player: Player, upgradeId: string)
     profile.Upgrades[upgradeId] = true
     profile.Dirty = true
     self:_ScheduleSave(player, profile)
+end
+
+-- ---------------------------------------------------------------------------
+-- Shop API (GDD §4.6 / §7.1 slice: 5 gear upgrades, Filaments only)
+-- ---------------------------------------------------------------------------
+
+--- Catalog for the shop UI: ordered, serializable, exact GDD costs.
+function EconomyService:GetShopCatalog(): { any }
+    local out: { any } = {}
+    for _, id in ipairs(UPGRADE_ORDER) do
+        local def = UPGRADES[id]
+        table.insert(out, {
+            Id = def.Id,
+            Name = def.Name,
+            Cost = def.Cost,
+            Description = def.Description,
+        })
+    end
+    return out
+end
+
+--- The purchase path the Client RPC calls. Effects are read-live by the owning
+--- seams (HasUpgrade), so nothing else needs to run on purchase — the gear is
+--- "applied" the moment ownership flips.
+function EconomyService:PurchaseUpgradeForPlayer(player: Player, upgradeId: string): any
+    local def = UPGRADES[upgradeId]
+    if def == nil then
+        return { Success = false, Reason = "unknown_upgrade" }
+    end
+    local profile = self:_Profile(player)
+    if profile.Upgrades[upgradeId] then
+        return { Success = false, Reason = "already_owned" }
+    end
+    if profile.Filaments < def.Cost then
+        return {
+            Success = false,
+            Reason = "insufficient_funds",
+            Cost = def.Cost,
+            Balance = profile.Filaments,
+        }
+    end
+    profile.Filaments -= def.Cost
+    self:SetUpgradeOwned(player, upgradeId)
+    self.Client.FilamentsChanged:Fire(player, profile.Filaments)
+    self.Client.UpgradesChanged:Fire(player)
+    print(("[EconomyService] %s bought %s (-%dF, balance %dF)."):format(player.Name, def.Name, def.Cost, profile.Filaments))
+    return {
+        Success = true,
+        Balance = profile.Filaments,
+        Upgrade = {
+            Id = def.Id,
+            Name = def.Name,
+            Cost = def.Cost,
+            Description = def.Description,
+        },
+    }
 end
 
 -- ---------------------------------------------------------------------------
