@@ -129,6 +129,10 @@ local RunHudController = Knit.CreateController {
     FlashTween = nil :: Tween?,
     RegularSlots = {} :: { any },
     SpecialSlotUI = nil :: any,
+    -- Lobby / host-gating state (GDD §2/§3.2).
+    Host = nil :: any?, -- { UserId, Name } from RunService.Host
+    SquadNames = {} :: { string },
+    RunService = nil :: any?,
 }
 
 -- ---------------------------------------------------------------------------
@@ -320,6 +324,38 @@ function RunHudController:_BuildGui()
     ui.LootHint = Label(ui.LootScreen, "", UDim2.fromScale(0.92, 0.05), UDim2.fromScale(0.5, 0.86), FONT_BODY, 14, DIM, Enum.TextXAlignment.Center) :: TextLabel
     ui.LootHint.AnchorPoint = Vector2.new(0.5, 0)
 
+    -- Lobby / start bar (host gating, GDD §2/§3.2). Bottom-center strip shown
+    -- whenever a run is NOT active (lobby + after extract/wipe = "run it back").
+    -- Sits above the loot screen (later sibling) so the host can start without
+    -- console. In-run the bar hides — the dark doesn't want a menu.
+    ui.LobbyBar = Panel(ui.Root, UDim2.fromOffset(580, 46), UDim2.new(0.5, 0, 1, -14), Vector2.new(0.5, 1))
+    ui.LobbyBar.ZIndex = 4
+    ui.LobbyBar.Visible = false
+    Stroke(ui.LobbyBar, STROKE, 0.75, 1)
+    New("UICorner", { CornerRadius = UDim.new(0, 6) }, ui.LobbyBar)
+    ui.LobbyHost = Label(ui.LobbyBar, "WAITING FOR HOST", UDim2.new(0.32, 0, 1, 0), UDim2.fromOffset(12, 0), FONT_MONO, 13, DIM, Enum.TextXAlignment.Left) :: TextLabel
+    ui.LobbySquad = Label(ui.LobbyBar, "SQUAD —", UDim2.new(0.36, 0, 1, 0), UDim2.new(0.33, 0, 0, 0), FONT_BODY, 12, TEXT, Enum.TextXAlignment.Center) :: TextLabel
+    ui.StartButton = New("TextButton", {
+        Name = "StartRunButton",
+        Size = UDim2.new(0.3, 0, 1, 0),
+        Position = UDim2.new(0.7, 0, 0, 0),
+        AnchorPoint = Vector2.new(0, 0),
+        BackgroundColor3 = Color3.fromRGB(30, 26, 18),
+        BackgroundTransparency = 0.1,
+        BorderSizePixel = 0,
+        Text = "START RUN",
+        Font = FONT_HEAD,
+        TextSize = 15,
+        TextColor3 = AMBER,
+        Visible = false,
+    }, ui.LobbyBar) :: TextButton
+    Stroke(ui.StartButton, AMBER, 0.5, 1)
+    New("UICorner", { CornerRadius = UDim.new(0, 6) }, ui.StartButton)
+    ui.StartButton.Activated:Connect(function()
+        self:RequestStartRun()
+    end)
+    ui.WaitingHint = Label(ui.LobbyBar, "WAITING FOR HOST TO START", UDim2.new(0.3, 0, 1, 0), UDim2.new(0.7, 0, 0, 0), FONT_BODY, 12, DIM, Enum.TextXAlignment.Center) :: TextLabel
+
     Log("HUD built")
 end
 
@@ -462,6 +498,9 @@ function RunHudController:SetRunState(state: string, payload: any?)
     local inRun = state == "in-run"
     self.UI.CarryRow.Visible = inRun
     self.UI.LumenBar.Visible = inRun
+    -- Lobby/start bar: visible whenever a run is NOT active, so the host can
+    -- start a fresh run AND run it back after extract/wipe (§3.2).
+    self.UI.LobbyBar.Visible = not inRun
     self.UI.RunStateLabel.Text = string.upper(state):gsub("%-", " ")
     if state == "lobby" then
         self.UI.FloorNumber.Text = "—"
@@ -478,6 +517,49 @@ function RunHudController:SetRunState(state: string, payload: any?)
         self:ShowWipeScreen(payload)
     end
     Log(("Run state -> %s"):format(state))
+end
+
+-- ---------------------------------------------------------------------------
+-- Lobby / host gating (GDD §2/§3.2)
+-- ---------------------------------------------------------------------------
+-- The START RUN button belongs to the host (first player in the server). When
+-- the server has no host or the local player isn't it, show the waiting state.
+function RunHudController:UpdateLobby()
+    local ui = self.UI
+    local host = self.Host
+    if type(host) ~= "table" then
+        ui.LobbyHost.Text = "WAITING FOR HOST"
+        ui.LobbyHost.TextColor3 = DIM
+        ui.StartButton.Visible = false
+        ui.WaitingHint.Visible = true
+        ui.WaitingHint.Text = "WAITING FOR HOST TO START"
+    else
+        ui.LobbyHost.Text = ("HOST  %s"):format(tostring(host.Name))
+        ui.LobbyHost.TextColor3 = AMBER
+        local isHost = self.Player ~= nil and host.UserId == self.Player.UserId
+        ui.StartButton.Visible = isHost
+        ui.WaitingHint.Visible = not isHost
+        ui.WaitingHint.Text = isHost and "YOU QUEUE THE RUN" or "WAITING FOR HOST TO START"
+    end
+    local names = self.SquadNames
+    ui.LobbySquad.Text = #names > 0 and ("SQUAD  %s"):format(table.concat(names, " · ")) or "SQUAD  —"
+end
+
+--- Host clicks START RUN → RunService.StartRun RPC (server re-validates host).
+function RunHudController:RequestStartRun()
+    local runService = self.RunService
+    if runService == nil then
+        return
+    end
+    runService:StartRun():andThen(function(result: any)
+        if type(result) == "table" and not result.Started then
+            Log(("StartRun rejected: %s"):format(tostring(result.Reason)))
+            -- e.g. another player grabbed host, or a run is somehow active —
+            -- the next host event re-renders the bar.
+        end
+    end):catch(function(err: any)
+        warn("[RunHudController] StartRun failed:", err)
+    end)
 end
 
 -- ---------------------------------------------------------------------------
@@ -653,6 +735,7 @@ function RunHudController:KnitStart()
 
     local lumenService = Knit.GetService("LumenService")
     local runService = Knit.GetService("RunService")
+    self.RunService = runService
     local artifactService = Knit.GetService("ArtifactService")
     local extractionService = Knit.GetService("ExtractionService")
     local entityService = Knit.GetService("EntityService")
@@ -703,9 +786,30 @@ function RunHudController:KnitStart()
         self:SetRunState(state, payload)
     end)
     runService.RunInfo:Observe(function(info: any)
-        if type(info) == "table" and type(info.Floor) == "number" then
+        if type(info) ~= "table" then
+            return
+        end
+        if type(info.Floor) == "number" then
             self:SetFloor(info.Floor)
         end
+        -- Lobby bar: squad list + host changes ride along in RunInfo too.
+        if type(info.Squad) == "table" then
+            self.SquadNames = info.Squad
+        end
+        if type(info.Host) == "table" then
+            self.Host = info.Host
+        end
+        self:UpdateLobby()
+    end)
+    -- Host changes (dedicated surface — fires on promotion/clear, incl. when
+    -- the current host leaves and the next player takes over).
+    runService.Host:Observe(function(host: any?)
+        self.Host = host
+        self:UpdateLobby()
+    end)
+    runService.HostChanged:Connect(function(host: any?)
+        self.Host = host
+        self:UpdateLobby()
     end)
     extractionService.FloorAdvanced:Connect(function(floor: number)
         self:SetFloor(floor)
